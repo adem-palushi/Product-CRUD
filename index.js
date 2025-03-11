@@ -1,12 +1,12 @@
 const express = require('express');
 const mongoose = require('mongoose');
+require('dotenv').config();
 const multer = require('multer');
 const cors = require('cors');
 const path = require('path');
-const bcrypt = require('bcrypt');
-const jwt = require('jsonwebtoken');
+const bcrypt = require('bcrypt');  // For hashing passwords
+const jwt = require('jsonwebtoken');  // For generating tokens
 const router = express.Router(); // Define the router
-require('dotenv').config();
 const fs = require('fs');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
 
@@ -15,9 +15,22 @@ console.log('JWT_SECRET:', process.env.JWT_SECRET);
 const app = express();
 const port = 3002;
 
+// Initialize Socket.IO with CORS settings
+const http = require('http');
+const server = http.createServer(app);
+const io = require('socket.io')(server, {
+  cors: {
+    origin: 'http://localhost:3000', // Allow your frontend to connect
+    methods: ['GET', 'POST'],
+    allowedHeaders: ['Content-Type'],
+  },
+});
+
 // Middleware
 app.use(cors({ origin: 'http://localhost:3000' }));
+
 app.use(express.json());
+
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // Create uploads directory if it doesn't exist
@@ -133,23 +146,10 @@ app.post('/api/auth/login', async (req, res) => {
   }
 });
 
-
-// // Get all products
-// app.get('/api/products', authenticate, async (req, res) => {
-//   try {
-//     const products = await Product.find();
-//     res.status(200).send(products);
-//   } catch (error) {
-//     res.status(500).send({ message: 'Error fetching products', error: error.message });
-//   }
-// });
-
-
 // Your routes go here
 router.get('/products', async (req, res) => {
   const { search } = req.query;
   try {
-    // If search query exists, filter the products accordingly
     const query = search ? {
       $or: [
         { name: { $regex: search, $options: 'i' } },
@@ -167,6 +167,31 @@ router.get('/products', async (req, res) => {
 // Using the router
 app.use('/api', router); // The API route prefix
 
+let activeNotifications = [];
+// Socket.IO event for new product creation
+io.on('connection', (socket) => {
+  console.log('A user connected to Socket.IO');
+
+  socket.on('disconnect', () => {
+    console.log('User disconnected');
+  });
+
+  // // Emit existing notifications when a client connects
+  // socket.emit('loadNotifications', activeNotifications);
+
+  socket.on('sendNotification', (notification) => {
+    // Check if notification already exists
+    if (!activeNotifications.some((notif) => notif.id === notification.id)) {
+      activeNotifications.push(notification);
+      io.emit('newNotification', notification);  // Broadcast new notification to all connected clients
+    }
+  });
+
+  socket.on('new-product', (product) => {
+    console.log('New product created:', product);
+    io.emit('product-created', product); // Broadcast new product event to all connected clients
+  });
+});
 
 // Get a single product by ID
 app.get('/api/products/:id', authenticate, async (req, res) => {
@@ -199,6 +224,7 @@ app.post('/api/products', authenticate, upload.single('image'), async (req, res)
 
   try {
     const savedProduct = await newProduct.save();
+    io.emit('product-created', savedProduct); // Emit a Socket.IO event after product is created
     res.status(201).json(savedProduct);
   } catch (error) {
     res.status(400).send({ message: 'Error creating product', error: error.message });
@@ -251,20 +277,22 @@ app.delete('/api/products/:id', authenticate, async (req, res) => {
 app.get('/api/photos', authenticate, async (req, res) => {
   try {
     const photos = await Photo.find();
-    res.status(200).send(photos);
+    res.status(200).json(photos);
   } catch (error) {
     res.status(500).send({ message: 'Error fetching photos', error: error.message });
   }
 });
 
+// Add a photo
 app.post('/api/photos', authenticate, upload.single('image'), async (req, res) => {
   const { title, description } = req.body;
-  console.log('Title:', title); // Debugging
-  console.log('File:', req.file); // Debugging
-
   const imageUrl = req.file ? `http://localhost:3002/uploads/${req.file.filename}` : null;
 
-  const newPhoto = new Photo({ title, description, image: imageUrl });
+  const newPhoto = new Photo({
+    title,
+    description,
+    image: imageUrl,
+  });
 
   try {
     const savedPhoto = await newPhoto.save();
@@ -274,33 +302,26 @@ app.post('/api/photos', authenticate, upload.single('image'), async (req, res) =
   }
 });
 
+// Delete a photo by ID
 app.delete('/api/photos/:id', authenticate, async (req, res) => {
   try {
-    console.log('Photo ID received for deletion:', req.params.id); // Debugging
     const photo = await Photo.findByIdAndDelete(req.params.id);
     if (!photo) return res.status(404).send({ message: 'Photo not found' });
 
-    res.status(200).send({ message: 'Photo deleted successfully!', photo });
+    // If you want to delete the image file from the server as well
+    const imagePath = path.join(__dirname, 'uploads', path.basename(photo.image));
+    if (fs.existsSync(imagePath)) {
+      fs.unlinkSync(imagePath);
+    }
+
+    res.status(200).send({ message: 'Photo deleted!', photo });
   } catch (error) {
     res.status(500).send({ message: 'Error deleting photo', error: error.message });
   }
 });
 
-// General App Info
-app.get('/api/info', (req, res) => {
-  const appInfo = {
-    name: 'Product Management App',
-    email: 'example@example.com',
-    phone: '+123456789',
-    socialMedia: {
-      instagram: '@example',
-      facebook: 'ExamplePage',
-    },
-  };
-  res.status(200).send(appInfo);
-});
 
 // Start the server
-app.listen(port, () => {
+server.listen(port, () => {
   console.log(`Server is running on http://localhost:${port}`);
 });
